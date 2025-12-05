@@ -1,0 +1,7 @@
+fastmcp
+httpx
+pydantic
+python-dotenv
+
+FRESHDESK_API_KEY=YMkFyZwB3FYBgfIu70vU
+FRESHDESK_DOMAIN=hungamaltd.freshdesk.com
