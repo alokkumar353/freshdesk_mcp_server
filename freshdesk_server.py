@@ -1,5 +1,14 @@
+from __future__ import annotations
+
+# --- FastMCP import shim (supports both package layouts) ---
+try:
+    # Preferred modern package
+    from fastmcp import FastMCP
+except ImportError:
+    # Older installs expose it here
+    from mcp.server.fastmcp import FastMCP
+
 import httpx
-from mcp.server.fastmcp import FastMCP
 import logging
 import os
 import base64
@@ -75,6 +84,7 @@ class TicketPriority(IntEnum):
     MEDIUM = 2
     HIGH = 3
     URGENT = 4
+
 class AgentTicketScope(IntEnum):
     GLOBAL_ACCESS = 1
     GROUP_ACCESS = 2
@@ -235,7 +245,7 @@ async def create_ticket(
     email: Optional[str] = None,
     requester_id: Optional[int] = None,
     custom_fields: Optional[Dict[str, Any]] = None,
-    additional_fields: Optional[Dict[str, Any]] = None  # 👈 new parameter
+    additional_fields: Optional[Dict[str, Any]] = None
 ) -> str:
     """Create a ticket in Freshdesk"""
     # Validate requester information
@@ -525,6 +535,7 @@ async def update_contact(contact_id: int, contact_fields: Dict[str, Any])-> Dict
     async with httpx.AsyncClient() as client:
         response = await client.put(url, headers=headers, json=data)
         return response.json()
+
 @mcp.tool()
 async def list_canned_responses(folder_id: int)-> list[Dict[str, Any]]:
     """List all canned responses in Freshdesk."""
@@ -560,6 +571,7 @@ async def view_canned_response(canned_response_id: int)-> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
         response = await client.get(url, headers=headers)
         return response.json()
+
 @mcp.tool()
 async def create_canned_response(canned_response_fields: Dict[str, Any])-> Dict[str, Any]:
     """Create a canned response in Freshdesk."""
@@ -589,6 +601,7 @@ async def update_canned_response(canned_response_id: int, canned_response_fields
     async with httpx.AsyncClient() as client:
         response = await client.put(url, headers=headers, json=canned_response_fields)
         return response.json()
+
 @mcp.tool()
 async def create_canned_response_folder(name: str)-> Dict[str, Any]:
     """Create a canned response folder in Freshdesk."""
@@ -602,6 +615,7 @@ async def create_canned_response_folder(name: str)-> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
         response = await client.post(url, headers=headers, json=data)
         return response.json()
+
 @mcp.tool()
 async def update_canned_response_folder(folder_id: int, name: str)-> Dict[str, Any]:
     """Update a canned response folder in Freshdesk."""
@@ -633,9 +647,10 @@ async def list_solution_articles(folder_id: int)-> list[Dict[str, Any]]:
 
 @mcp.tool()
 async def list_solution_folders(category_id: int)-> list[Dict[str, Any]]:
+    """List all solution folders in Freshdesk."""
     if not category_id:
         return {"error": "Category ID is required"}
-    """List all solution folders in Freshdesk."""
+    
     url = f"https://{FRESHDESK_DOMAIN}/api/v2/solutions/categories/{category_id}/folders"
     headers = {
         "Authorization": f"Basic {base64.b64encode(f'{FRESHDESK_API_KEY}:X'.encode()).decode()}"
@@ -717,6 +732,7 @@ async def view_solution_category_folder(folder_id: int)-> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
         response = await client.get(url, headers=headers)
         return response.json()
+
 @mcp.tool()
 async def update_solution_category_folder(folder_id: int, folder_fields: Dict[str, Any])-> Dict[str, Any]:
     """Update a solution category folder in Freshdesk."""
@@ -827,6 +843,7 @@ async def search_agents(query: str) -> list[Dict[str, Any]]:
     async with httpx.AsyncClient() as client:
         response = await client.get(url, headers=headers)
         return response.json()
+
 @mcp.tool()
 async def list_groups(page: Optional[int] = 1, per_page: Optional[int] = 30)-> list[Dict[str, Any]]:
     """List all groups in Freshdesk."""
@@ -891,6 +908,7 @@ async def create_ticket_field(ticket_field_fields: Dict[str, Any]) -> Dict[str, 
     async with httpx.AsyncClient() as client:
         response = await client.post(url, headers=headers, json=ticket_field_fields)
         return response.json()
+
 @mcp.tool()
 async def view_ticket_field(ticket_field_id: int) -> Dict[str, Any]:
     """View a ticket field in Freshdesk."""
@@ -987,6 +1005,7 @@ async def update_contact_field(contact_field_id: int, contact_field_fields: Dict
     async with httpx.AsyncClient() as client:
         response = await client.put(url, headers=headers, json=contact_field_fields)
         return response.json()
+
 @mcp.tool()
 async def get_field_properties(field_name: str):
     """Get properties of a specific field by name."""
@@ -1007,7 +1026,7 @@ async def get_field_properties(field_name: str):
     return matched_field
 
 @mcp.prompt()
-def create_ticket(
+def create_ticket_prompt(
     subject: str,
     description: str,
     source: str,
@@ -1038,7 +1057,7 @@ Make sure to reference the correct keys from `get_field_properties()` when const
 """
 
 @mcp.prompt()
-def create_reply(
+def create_reply_prompt(
     ticket_id:int,
     reply_message: str,
 ) -> str:
@@ -1247,7 +1266,14 @@ async def delete_ticket_summary(ticket_id: int) -> Dict[str, Any]:
         except Exception as e:
             return {"error": f"An unexpected error occurred: {str(e)}"}
 
-# FIXED: Simplified main entry point
+# ----------------------------
+# MAIN — Streamable HTTP on 127.0.0.1:8001/mcp
+# ----------------------------
 if __name__ == "__main__":
-    logging.info("Starting Freshdesk MCP server")
-    mcp.run(transport='streamable-http')
+    print("Starting Freshdesk MCP Streamable HTTP server at http://127.0.0.1:8001/mcp")
+    mcp.run(
+        "http",               # Streamable HTTP transport
+        host="127.0.0.1",
+        port=8001,            # Different port from Mixpanel
+        path="/mcp"
+    )
