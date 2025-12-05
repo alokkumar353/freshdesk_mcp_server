@@ -1247,9 +1247,7 @@ async def delete_ticket_summary(ticket_id: int) -> Dict[str, Any]:
         except Exception as e:
             return {"error": f"An unexpected error occurred: {str(e)}"}
 
-def main():
+# FIXED: Simplified main entry point
+if __name__ == "__main__":
     logging.info("Starting Freshdesk MCP server")
     mcp.run(transport='streamable-http')
-
-if __name__ == "__main__":
-    main()
