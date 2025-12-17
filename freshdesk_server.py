@@ -18,6 +18,10 @@ import re
 from pydantic import BaseModel, Field
 import dotenv
 
+from datetime import datetime, timedelta
+from typing import Literal
+import json
+
 # Load environment variables from .env file
 dotenv.load_dotenv()
 
@@ -29,6 +33,11 @@ mcp = FastMCP("freshdesk-mcp")
 
 FRESHDESK_API_KEY = os.getenv("FRESHDESK_API_KEY")
 FRESHDESK_DOMAIN = os.getenv("FRESHDESK_DOMAIN")
+
+HUNGAMA_API_KEY = os.getenv("HUNGAMA_API_KEY")
+HUNGAMA_USER_API = os.getenv("HUNGAMA_USER_API")
+HUNGAMA_SUBSCRIPTION_API = os.getenv("HUNGAMA_SUBSCRIPTION_API")
+HUNGAMA_UNSUBSCRIPTION_API = os.getenv("HUNGAMA_UNSUBSCRIPTION_API")
 
 
 def parse_link_header(link_header: str) -> Dict[str, Optional[int]]:
@@ -1265,6 +1274,1061 @@ async def delete_ticket_summary(ticket_id: int) -> Dict[str, Any]:
             return {"error": f"Failed to delete ticket summary: {str(e)}"}
         except Exception as e:
             return {"error": f"An unexpected error occurred: {str(e)}"}
+
+# ============================================================================
+# HUNGAMA API INTEGRATION TOOLS
+# ============================================================================
+
+
+@mcp.tool()
+async def get_hungama_user_id(mobile_number: str) -> Dict[str, Any]:
+    """Get USER_ID (identity) from Hungama User API using mobile number.
+    
+    Args:
+        mobile_number: Mobile number (e.g., "919930130530")
+    
+    Returns:
+        Dict containing USER_ID and user details
+    """
+    url = HUNGAMA_USER_API
+    params = {
+        "action": "getuserdetails",
+        "username": mobile_number
+    }
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(url, params=params, timeout=10.0)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if data.get("code") == "200":
+                return {
+                    "success": True,
+                    "identity": data["data"]["USER_ID"],
+                    "username": data["data"]["USER_NAME"],
+                    "data": data["data"]
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "User not found",
+                    "message": data.get("message", "Unknown error")
+                }
+                
+        except httpx.TimeoutException:
+            return {
+                "success": False,
+                "error": "API timeout - retrying recommended"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Failed to get user ID: {str(e)}"
+            }
+
+@mcp.tool()
+async def get_hungama_subscription(
+    identity: str,
+    product_id: str = "1",
+    device: str = "android",
+    variant: str = "v1"
+) -> Dict[str, Any]:
+    """Get subscription details from Hungama Subscription Status API.
+    
+    Args:
+        identity: USER_ID from get_hungama_user_id
+        product_id: Product identifier (default: "1")
+        device: Device type (default: "android")
+        variant: API variant (default: "v1")
+    
+    Returns:
+        Dict containing subscription details including order_id, plan, status
+    """
+    url = HUNGAMA_SUBSCRIPTION_API
+    params = {"country": "IN"}
+    headers = {"Content-Type": "application/json"}
+    
+    body = {
+        "identity": identity,
+        "product_id": product_id,
+        "device": device,
+        "variant": variant
+    }
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                url, 
+                params=params, 
+                headers=headers, 
+                json=body,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if data.get("success"):
+                # Extract critical data points
+                subscriptions = data.get("data", {}).get("subscriptions", {})
+                auto_renewal = data.get("data", {}).get("auto_renewal", {})
+                
+                return {
+                    "success": True,
+                    "order_id": subscriptions.get("order_id"),
+                    "subscription_status": subscriptions.get("subscription_status"),
+                    "plan_name": subscriptions.get("plan_name"),
+                    "subscription_end_date": subscriptions.get("subscription_end_date"),
+                    "days_remaining": subscriptions.get("days_remaining"),
+                    "payment_source": subscriptions.get("payment_source"),
+                    "plan_price": subscriptions.get("plan_price"),
+                    "currency": subscriptions.get("currency"),
+                    "auto_renewal_status": auto_renewal.get("status"),
+                    "full_data": data
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "Failed to get subscription",
+                    "message": data.get("message")
+                }
+                
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Failed to get subscription: {str(e)}"
+            }
+
+@mcp.tool()
+async def cancel_hungama_subscription(
+    order_id: str,
+    identity: str,
+    platform_id: int = 1,
+    product_id: int = 1
+) -> Dict[str, Any]:
+    """Cancel auto-renewal subscription via Hungama Unsubscription API.
+    
+    Args:
+        order_id: Order ID from subscription details
+        identity: USER_ID from user API
+        platform_id: Platform identifier (default: 1)
+        product_id: Product identifier (default: 1)
+    
+    Returns:
+        Dict containing cancellation status
+    """
+    url = HUNGAMA_UNSUBSCRIPTION_API
+    headers = {
+        "Content-Type": "application/json",
+        "api-key": HUNGAMA_API_KEY
+    }
+    
+    body = {
+        "order_id": order_id,
+        "identity": identity,
+        "platform_id": platform_id,
+        "product_id": product_id
+    }
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                url,
+                headers=headers,
+                json=body,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            return {
+                "success": data.get("success", False),
+                "status_code": data.get("statusCode"),
+                "message": data.get("message"),
+                "order_id": order_id
+            }
+                
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Failed to cancel subscription: {str(e)}"
+            }
+
+# ============================================================================
+# TICKET ENRICHMENT TOOLS
+# ============================================================================
+
+@mcp.tool()
+async def enrich_ticket_with_subscription_data(ticket_id: int) -> Dict[str, Any]:
+    """Fetch user subscription data and add as internal note to ticket.
+    
+    This tool:
+    1. Gets ticket details to extract mobile number
+    2. Calls Hungama User API to get identity
+    3. Calls Hungama Subscription API to get subscription details
+    4. Adds enrichment data as internal note
+    
+    Args:
+        ticket_id: Freshdesk ticket ID
+    
+    Returns:
+        Dict containing enrichment status and data
+    """
+    # Step 1: Get ticket
+    ticket = await get_ticket(ticket_id)
+    if "error" in ticket:
+        return {"success": False, "error": "Failed to fetch ticket"}
+    
+    # Step 2: Extract mobile number
+    mobile_number = ticket.get("custom_fields", {}).get("cf_mobile_number")
+    if not mobile_number:
+        # Flag ticket as missing mobile
+        await update_ticket(ticket_id, {
+            "tags": ticket.get("tags", []) + ["MISSING_MOBILE"]
+        })
+        return {
+            "success": False,
+            "error": "Mobile number not found in ticket"
+        }
+    
+    # Step 3: Get USER_ID
+    user_data = await get_hungama_user_id(mobile_number)
+    if not user_data.get("success"):
+        await update_ticket(ticket_id, {
+            "tags": ticket.get("tags", []) + ["USER_API_FAILED"]
+        })
+        return {
+            "success": False,
+            "error": "Failed to get user ID",
+            "details": user_data
+        }
+    
+    identity = user_data.get("identity")
+    
+    # Step 4: Get subscription details
+    subscription_data = await get_hungama_subscription(identity)
+    if not subscription_data.get("success"):
+        await update_ticket(ticket_id, {
+            "tags": ticket.get("tags", []) + ["SUBSCRIPTION_API_FAILED"]
+        })
+        return {
+            "success": False,
+            "error": "Failed to get subscription",
+            "details": subscription_data
+        }
+    
+    # Step 5: Add enrichment note
+    enrichment_note = f"""✅ Enriched by AI
+User ID: {identity}
+Order ID: {subscription_data.get('order_id')}
+Subscription: {subscription_data.get('plan_name')} ({'Active' if subscription_data.get('subscription_status') == 1 else 'Inactive'})
+Valid until: {subscription_data.get('subscription_end_date')} ({subscription_data.get('days_remaining')} days)
+Payment: {subscription_data.get('payment_source')}
+Auto-renewal: {'Enabled' if subscription_data.get('auto_renewal_status') == 1 else 'Disabled'}
+Enriched at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+    
+    await create_ticket_note(ticket_id, enrichment_note)
+    
+    return {
+        "success": True,
+        "ticket_id": ticket_id,
+        "mobile_number": mobile_number,
+        "identity": identity,
+        "enrichment_data": subscription_data
+    }
+
+# ============================================================================
+# TICKET CLASSIFICATION TOOLS
+# ============================================================================
+
+@mcp.tool()
+async def classify_ticket(ticket_id: int) -> Dict[str, Any]:
+    """Classify ticket into predefined categories using keyword matching.
+    
+    Categories:
+    - AUTO_RENEWAL_CANCELLATION
+    - PAYMENT_NOT_ACTIVATED
+    - SUBSCRIPTION_NOT_VISIBLE
+    - REFUND_REQUEST
+    - ARTICLE_FEEDBACK
+    - GENERAL_QUERY
+    - PROFILE_ISSUES
+    - TRANSACTION_STATUS
+    - SPAM_PROMOTIONAL
+    - NEEDS_MANUAL_REVIEW
+    
+    Args:
+        ticket_id: Freshdesk ticket ID
+    
+    Returns:
+        Dict containing category, confidence score, and tags
+    """
+    # Get ticket
+    ticket = await get_ticket(ticket_id)
+    if "error" in ticket:
+        return {"success": False, "error": "Failed to fetch ticket"}
+    
+    # Extract text
+    subject = ticket.get("subject", "").lower()
+    description = ticket.get("description_text", "").lower()
+    ticket_text = f"{subject} {description}"
+    
+    # Classification keywords (from PRD Section 9.1)
+    categories = {
+        "AUTO_RENEWAL_CANCELLATION": [
+            "stop auto renewal", "cancel auto renewal", "stop e-mandate",
+            "cancel e-mandate", "stop subscription", "cancel subscription",
+            "unsubscribe", "don't want auto renewal", "stop automatic payment",
+            "revoke mandate", "stop recurring charge"
+        ],
+        "PAYMENT_NOT_ACTIVATED": [
+            "payment done but not activated", "paid but no subscription",
+            "payment successful but not showing", "subscription not activated",
+            "cannot see subscription after payment", "paid yesterday no access"
+        ],
+        "SUBSCRIPTION_NOT_VISIBLE": [
+            "subscription not visible", "cannot see subscription",
+            "subscription not showing", "not able to see premium",
+            "where is my subscription"
+        ],
+        "REFUND_REQUEST": [
+            "refund", "money back", "return money", "duplicate charge",
+            "double charge", "charged twice", "debited twice",
+            "unauthorized payment"
+        ],
+        "ARTICLE_FEEDBACK": [
+            "article feedback"
+        ],
+        "GENERAL_QUERY": [
+            "how to", "what is", "general query", "subscription related query",
+            "how does it work"
+        ],
+        "PROFILE_ISSUES": [
+            "account hacked", "cannot edit profile", "delete account",
+            "delete my account", "delete personal information", "profile locked"
+        ],
+        "TRANSACTION_STATUS": [
+            "transaction status", "payment pending", "payment failed",
+            "payment successful", "transaction failed"
+        ],
+        "SPAM_PROMOTIONAL": [
+            "promotional", "event invitation", "marketing", "newsletter"
+        ]
+    }
+    
+    # Calculate confidence scores
+    scores = {}
+    for category, keywords in categories.items():
+        matches = sum(1 for keyword in keywords if keyword in ticket_text)
+        if len(keywords) > 0:
+            scores[category] = (matches / len(keywords)) * 100
+        else:
+            scores[category] = 0
+    
+    # Get best category
+    if not scores or max(scores.values()) == 0:
+        category = "NEEDS_MANUAL_REVIEW"
+        confidence = 0
+    else:
+        category = max(scores, key=scores.get)
+        confidence = scores[category]
+    
+    # If confidence < 80%, flag for manual review
+    if confidence < 80 and category != "NEEDS_MANUAL_REVIEW":
+        category = "NEEDS_MANUAL_REVIEW"
+    
+    # Determine priority
+    priority_map = {
+        "PAYMENT_NOT_ACTIVATED": 3,  # High
+        "REFUND_REQUEST": 3,          # High
+        "PROFILE_ISSUES": 3,          # High
+        "AUTO_RENEWAL_CANCELLATION": 2,  # Medium
+        "TRANSACTION_STATUS": 2,      # Medium
+        "NEEDS_MANUAL_REVIEW": 2,     # Medium
+        "SUBSCRIPTION_NOT_VISIBLE": 2, # Medium
+        "ARTICLE_FEEDBACK": 1,        # Low
+        "GENERAL_QUERY": 1,           # Low
+        "SPAM_PROMOTIONAL": 1         # Low
+    }
+    priority = priority_map.get(category, 2)
+    
+    # Update ticket with classification
+    tag = f"AI_{category}"
+    current_tags = ticket.get("tags", [])
+    
+    # Remove old AI tags
+    current_tags = [t for t in current_tags if not t.startswith("AI_")]
+    
+    # Add new tag
+    current_tags.append(tag)
+    
+    await update_ticket(ticket_id, {
+        "tags": current_tags,
+        "priority": priority,
+        "custom_fields": {
+            **ticket.get("custom_fields", {}),
+            "ai_confidence": round(confidence, 2)
+        }
+    })
+    
+    # Add classification note
+    classification_note = f"""✅ Classified by AI
+Category: {category}
+Confidence: {round(confidence, 2)}%
+Priority: {priority}
+Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+    
+    await create_ticket_note(ticket_id, classification_note)
+    
+    return {
+        "success": True,
+        "ticket_id": ticket_id,
+        "category": category,
+        "confidence": round(confidence, 2),
+        "priority": priority,
+        "tag": tag
+    }
+
+# ============================================================================
+# RESPONSE TEMPLATE TOOLS
+# ============================================================================
+
+# Template storage (you can move this to a JSON file later)
+RESPONSE_TEMPLATES = {
+    "A1": {
+        "name": "Auto-Renewal Cancellation (Active)",
+        "condition": "subscription_status == 1",
+        "html": """Dear Valued Customer,<br><br>
+
+Thank you for reaching out to Hungama Support.<br><br>
+
+We have successfully cancelled your auto-renewal subscription as requested.<br><br>
+
+<strong>Your Cancellation Details:</strong><br>
+✓ Subscription: {{plan_name}}<br>
+✓ Order ID: {{order_id}}<br>
+✓ Cancellation Date: {{current_date}}<br>
+✓ Valid Until: {{subscription_end_date}} ({{days_remaining}} days remaining)<br>
+✓ Payment Method: {{payment_source}}<br><br>
+
+<strong>Important Information:</strong><br>
+- You will NOT be charged again after {{subscription_end_date}}<br>
+- You can continue enjoying Hungama Music until {{subscription_end_date}}<br>
+- Your subscription will automatically expire on {{subscription_end_date}}<br>
+- All your playlists and favorites will remain saved in your account<br><br>
+
+If you change your mind, you can resubscribe anytime from the Hungama app or website.<br><br>
+
+We're sorry to see you go and hope to serve you again soon!<br><br>
+
+Regards,<br>
+<strong>Hungama Support Team</strong><br>
+Customer Relations<br>
+Hungama Digital Media Entertainment Pvt. Ltd."""
+    },
+    "A2": {
+        "name": "Auto-Renewal Cancellation (Inactive)",
+        "condition": "subscription_status == 0",
+        "html": """Dear Valued Customer,<br><br>
+
+Thank you for contacting Hungama Support.<br><br>
+
+We have reviewed your account and found that your subscription has already expired.<br><br>
+
+<strong>Your Subscription Details:</strong><br>
+- Plan: {{plan_name}}<br>
+- Expired On: {{subscription_end_date}}<br>
+- Current Status: Inactive<br><br>
+
+<strong>Good News:</strong><br>
+Since your subscription has already ended, there will be no further charges to your account. Your auto-renewal has been automatically cancelled upon expiration.<br><br>
+
+If you wish to reactivate your Hungama Music subscription, you can:<br>
+1. Open the Hungama app<br>
+2. Go to "Subscribe" section<br>
+3. Choose your preferred plan<br>
+4. Complete the payment<br><br>
+
+We value your patronage and hope to serve you again!<br><br>
+
+Regards,<br>
+<strong>Hungama Support Team</strong>"""
+    },
+    "B1": {
+        "name": "Refund Request",
+        "html": """Dear Valued Customer,<br><br>
+
+Thank you for bringing this to our attention. We sincerely apologize for any inconvenience caused.<br><br>
+
+We have reviewed your account regarding the duplicate charge issue.<br><br>
+
+<strong>Immediate Action Taken:</strong><br>
+✓ Your auto-renewal subscription has been cancelled<br>
+✓ Order ID: {{order_id}}<br>
+✓ No further charges will be applied<br><br>
+
+<strong>Refund Investigation:</strong><br>
+We have initiated an investigation into the duplicate charge reported by you. Our billing team will review your transaction history and process the refund if applicable.<br><br>
+
+<strong>Transaction Details:</strong><br>
+- Plan: {{plan_name}}<br>
+- Amount: {{currency}} {{plan_price}}<br>
+- Payment Method: {{payment_source}}<br><br>
+
+<strong>Next Steps:</strong><br>
+- Our billing team will contact you within 24-48 hours<br>
+- If refund is applicable, it will be processed within 5-7 business days<br>
+- Refund will be credited to your original payment method<br><br>
+
+We deeply regret this error and appreciate your patience while we resolve this matter.<br><br>
+
+Regards,<br>
+<strong>Hungama Support Team</strong>"""
+    },
+    "C1": {
+        "name": "Payment Done - Subscription IS Active",
+        "html": """Dear Valued Customer,<br><br>
+
+Thank you for contacting Hungama Support.<br><br>
+
+Great news! We have checked your account and your subscription is already active.<br><br>
+
+<strong>Your Active Subscription Details:</strong><br>
+✓ Plan: {{plan_name}}<br>
+✓ Status: Active<br>
+✓ Valid Until: {{subscription_end_date}} ({{days_remaining}} days remaining)<br>
+✓ Order ID: {{order_id}}<br>
+✓ Payment Method: {{payment_source}}<br><br>
+
+<strong>If you're unable to access premium content, please try:</strong><br><br>
+
+1. <strong>Logout and Login Again:</strong><br>
+   • Go to Profile → Logout<br>
+   • Close the app completely<br>
+   • Reopen and login with your registered mobile: {{mobile_number}}<br><br>
+
+2. <strong>Clear App Cache:</strong><br>
+   • Android: Settings → Apps → Hungama → Clear Cache<br>
+   • iOS: Delete and reinstall the app<br><br>
+
+3. <strong>Update the App:</strong><br>
+   • Ensure you're using the latest version from Play Store/App Store<br><br>
+
+Your subscription is definitely active on our end. These steps should resolve any access issues.<br><br>
+
+Regards,<br>
+<strong>Hungama Support Team</strong>"""
+    },
+    "C2": {
+        "name": "Payment Done - Subscription NOT Active",
+        "html": """Dear Valued Customer,<br><br>
+
+Thank you for reaching out to Hungama Support.<br><br>
+
+We sincerely apologize for the inconvenience. We have reviewed your account and noticed that your payment has been received but the subscription has not been activated yet.<br><br>
+
+<strong>Your Payment Details:</strong><br>
+- Mobile Number: {{mobile_number}}<br>
+- Payment Method: {{payment_source}}<br>
+- Amount Paid: {{currency}} {{plan_price}}<br><br>
+
+<strong>Immediate Action:</strong><br>
+We have escalated this issue to our technical team on high priority. Your subscription will be activated within the next 24 hours.<br><br>
+
+<strong>What Happens Next:</strong><br>
+1. Our technical team will manually activate your subscription<br>
+2. You will receive a confirmation email once activated<br>
+3. You can start enjoying premium content immediately after activation<br><br>
+
+We deeply regret this delay and appreciate your patience.<br><br>
+
+Regards,<br>
+<strong>Hungama Support Team</strong>"""
+    }
+}
+
+# Add this BEFORE the main block (before if __name__ == "__main__":)
+
+@mcp.tool()
+async def list_available_templates() -> Dict[str, Any]:
+    """List all available response templates.
+    
+    Returns:
+        Dict containing all template IDs, names, and conditions
+    """
+    templates = []
+    for template_id, template_data in RESPONSE_TEMPLATES.items():
+        templates.append({
+            "id": template_id,
+            "name": template_data["name"],
+            "condition": template_data.get("condition", "Any")
+        })
+    
+    return {
+        "success": True,
+        "templates": templates,
+        "total": len(templates)
+    }
+
+@mcp.tool()
+async def get_response_template(
+    template_id: str,
+    variables: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Get populated response template with variable substitution.
+    
+    Args:
+        template_id: Template ID (A1, A2, B1, C1, C2, etc.)
+        variables: Dict of variables to substitute (e.g., {"plan_name": "MONTHLY PLAN"})
+    
+    Returns:
+        Dict containing populated HTML template
+    """
+    if template_id not in RESPONSE_TEMPLATES:
+        return {
+            "success": False,
+            "error": f"Template {template_id} not found"
+        }
+    
+    template = RESPONSE_TEMPLATES[template_id]
+    html = template["html"]
+    
+    # Add current_date if not provided
+    if "current_date" not in variables:
+        variables["current_date"] = datetime.now().strftime("%Y-%m-%d")
+    
+    # Substitute variables
+    for key, value in variables.items():
+        placeholder = "{{" + key + "}}"
+        html = html.replace(placeholder, str(value))
+    
+    return {
+        "success": True,
+        "template_id": template_id,
+        "template_name": template["name"],
+        "html": html
+    }
+
+@mcp.tool()
+async def send_templated_response(
+    ticket_id: int,
+    template_id: str,
+    enriched_data: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Send response to ticket using template with enriched subscription data.
+    
+    Args:
+        ticket_id: Freshdesk ticket ID
+        template_id: Template ID (A1, A2, B1, etc.)
+        enriched_data: Enrichment data from enrich_ticket_with_subscription_data
+    
+    Returns:
+        Dict containing response status
+    """
+    # Get template
+    template_result = await get_response_template(template_id, enriched_data)
+    
+    if not template_result.get("success"):
+        return template_result
+    
+    # Send response
+    response_result = await create_ticket_reply(
+        ticket_id,
+        template_result["html"]
+    )
+    
+    # Update ticket status to Resolved
+    await update_ticket(ticket_id, {
+        "status": 4,  # Resolved
+        "tags": ["AI_RESPONDED", "AUTO_CANCELLED"]
+    })
+    
+    # Add processing note
+    processing_note = f"""✅ Processed via AI Automation
+Template used: {template_id} ({template_result['template_name']})
+Response sent: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+    
+    await create_ticket_note(ticket_id, processing_note)
+    
+    return {
+        "success": True,
+        "ticket_id": ticket_id,
+        "template_id": template_id,
+        "response": response_result
+    }
+
+# ============================================================================
+# BATCH PROCESSING TOOLS
+# ============================================================================
+
+@mcp.tool()
+async def batch_cancel_and_respond(
+    ticket_ids: List[int],
+    template_id: str = "A1"
+) -> Dict[str, Any]:
+    """Process multiple tickets: cancel subscriptions and send responses.
+    
+    For each ticket:
+    1. Enrich with subscription data
+    2. Cancel subscription via Hungama API
+    3. Send templated response
+    4. Update ticket status
+    
+    Args:
+        ticket_ids: List of Freshdesk ticket IDs
+        template_id: Template to use (default: A1)
+    
+    Returns:
+        Dict containing batch processing results
+    """
+    results = {
+        "successful": [],
+        "failed": [],
+        "total": len(ticket_ids)
+    }
+    
+    batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    for ticket_id in ticket_ids:
+        try:
+            # Step 1: Enrich ticket
+            enrichment = await enrich_ticket_with_subscription_data(ticket_id)
+            
+            if not enrichment.get("success"):
+                results["failed"].append({
+                    "ticket_id": ticket_id,
+                    "error": "Enrichment failed",
+                    "details": enrichment
+                })
+                continue
+            
+            # Step 2: Cancel subscription
+            order_id = enrichment["enrichment_data"].get("order_id")
+            identity = enrichment["identity"]
+            
+            if not order_id:
+                results["failed"].append({
+                    "ticket_id": ticket_id,
+                    "error": "No order_id found"
+                })
+                continue
+            
+            cancellation = await cancel_hungama_subscription(order_id, identity)
+            
+            if not cancellation.get("success"):
+                results["failed"].append({
+                    "ticket_id": ticket_id,
+                    "error": "Cancellation API failed",
+                    "details": cancellation
+                })
+                # Flag ticket for manual review
+                await update_ticket(ticket_id, {
+                    "tags": ["CANCELLATION_FAILED"],
+                    "priority": 3
+                })
+                continue
+            
+            # Step 3: Send response
+            enrichment_data = enrichment["enrichment_data"]
+            enrichment_data["mobile_number"] = enrichment["mobile_number"]
+            
+            response = await send_templated_response(
+                ticket_id,
+                template_id,
+                enrichment_data
+            )
+            
+            if response.get("success"):
+                results["successful"].append({
+                    "ticket_id": ticket_id,
+                    "order_id": order_id
+                })
+            else:
+                results["failed"].append({
+                    "ticket_id": ticket_id,
+                    "error": "Response sending failed",
+                    "details": response
+                })
+                
+        except Exception as e:
+            results["failed"].append({
+                "ticket_id": ticket_id,
+                "error": str(e)
+            })
+    
+    # Create summary
+    summary = f"""✅ Batch Processing Complete
+Batch ID: {batch_id}
+Total tickets: {results['total']}
+Successful: {len(results['successful'])}
+Failed: {len(results['failed'])}
+Processed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+    
+    return {
+        "success": True,
+        "batch_id": batch_id,
+        "summary": summary,
+        "results": results
+    }
+
+# ============================================================================
+# DASHBOARD QUERY TOOLS
+# ============================================================================
+
+@mcp.tool()
+async def get_todays_open_tickets_by_category() -> Dict[str, Any]:
+    """Get today's open tickets grouped by AI category.
+    
+    Returns:
+        Dict containing tickets grouped by category with counts
+    """
+    # Search for today's open tickets
+    today = datetime.now().strftime("%Y-%m-%d")
+    query = f'status:2 AND created_at:"{today}"'
+    
+    search_result = await search_tickets(query)
+    
+    if "error" in search_result:
+        return search_result
+    
+    # Group by category
+    categories = {}
+    tickets = search_result.get("results", [])
+    
+    for ticket in tickets:
+        tags = ticket.get("tags", [])
+        category = "UNCATEGORIZED"
+        
+        for tag in tags:
+            if tag.startswith("AI_"):
+                category = tag.replace("AI_", "")
+                break
+        
+        if category not in categories:
+            categories[category] = []
+        
+        categories[category].append({
+            "id": ticket["id"],
+            "subject": ticket.get("subject"),
+            "status": ticket.get("status"),
+            "priority": ticket.get("priority"),
+            "created_at": ticket.get("created_at")
+        })
+    
+    # Count tickets per category
+    counts = {cat: len(tickets) for cat, tickets in categories.items()}
+    
+    return {
+        "success": True,
+        "date": today,
+        "total_tickets": len(tickets),
+        "categories": categories,
+        "counts": counts
+    }
+
+@mcp.tool()
+async def get_yesterdays_closed_tickets() -> Dict[str, Any]:
+    """Get yesterday's resolved tickets summary.
+    
+    Returns:
+        Dict containing closed tickets from yesterday
+    """
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    query = f'status:4 AND updated_at:"{yesterday}"'
+    
+    search_result = await search_tickets(query)
+    
+    if "error" in search_result:
+        return search_result
+    
+    tickets = search_result.get("results", [])
+    
+    # Count AI vs manual processing
+    ai_processed = sum(1 for t in tickets if "AI_RESPONDED" in t.get("tags", []))
+    manual_processed = len(tickets) - ai_processed
+    
+    return {
+        "success": True,
+        "date": yesterday,
+        "total_closed": len(tickets),
+        "ai_processed": ai_processed,
+        "manual_processed": manual_processed,
+        "tickets": tickets
+    }
+
+@mcp.tool()
+async def get_last_7_days_analysis() -> Dict[str, Any]:
+    """Get 7-day ticket analysis with trends.
+    
+    Returns:
+        Dict containing 7-day analysis
+    """
+    seven_days_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    # Get all tickets from last 7 days
+    query = f'created_at:>"{seven_days_ago}"'
+    search_result = await search_tickets(query)
+    
+    if "error" in search_result:
+        return search_result
+    
+    tickets = search_result.get("results", [])
+    
+    # Analyze by status
+    status_counts = {}
+    category_counts = {}
+    
+    for ticket in tickets:
+        status = ticket.get("status")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        
+        tags = ticket.get("tags", [])
+        for tag in tags:
+            if tag.startswith("AI_"):
+                category = tag.replace("AI_", "")
+                category_counts[category] = category_counts.get(category, 0) + 1
+    
+    return {
+        "success": True,
+        "period": f"{seven_days_ago} to {today}",
+        "total_tickets": len(tickets),
+        "status_breakdown": status_counts,
+        "category_breakdown": category_counts
+    }
+
+@mcp.tool()
+async def get_urgent_tickets() -> Dict[str, Any]:
+    """Get high-priority unresolved tickets requiring attention.
+    
+    Returns:
+        List of urgent tickets
+    """
+    # Search for high/urgent priority open tickets
+    query = 'status:2 AND (priority:3 OR priority:4)'
+    
+    search_result = await search_tickets(query)
+    
+    if "error" in search_result:
+        return search_result
+    
+    tickets = search_result.get("results", [])
+    
+    # Sort by created date (oldest first)
+    tickets.sort(key=lambda x: x.get("created_at", ""))
+    
+    urgent_list = []
+    for ticket in tickets:
+        urgent_list.append({
+            "id": ticket["id"],
+            "subject": ticket.get("subject"),
+            "priority": ticket.get("priority"),
+            "created_at": ticket.get("created_at"),
+            "age_hours": (datetime.now() - datetime.fromisoformat(
+                ticket.get("created_at", "").replace("Z", "+00:00")
+            )).total_seconds() / 3600 if ticket.get("created_at") else 0,
+            "tags": ticket.get("tags", [])
+        })
+    
+    return {
+        "success": True,
+        "total_urgent": len(urgent_list),
+        "tickets": urgent_list
+    }
+
+@mcp.tool()
+async def search_tickets_with_enrichment(
+    category: Optional[str] = None,
+    status: Optional[int] = None,
+    date_range: Optional[str] = None
+) -> Dict[str, Any]:
+    """Search tickets with enriched subscription data.
+    
+    Args:
+        category: AI category tag (e.g., "AUTO_RENEWAL_CANCELLATION")
+        status: Ticket status (2=Open, 3=Pending, 4=Resolved)
+        date_range: Date range (e.g., "today", "yesterday", "last_7_days")
+    
+    Returns:
+        Dict containing filtered tickets with enrichment
+    """
+    # Build query
+    query_parts = []
+    
+    if category:
+        query_parts.append(f'tag:"AI_{category}"')
+    
+    if status:
+        query_parts.append(f'status:{status}')
+    
+    if date_range:
+        if date_range == "today":
+            date = datetime.now().strftime("%Y-%m-%d")
+            query_parts.append(f'created_at:"{date}"')
+        elif date_range == "yesterday":
+            date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            query_parts.append(f'created_at:"{date}"')
+        elif date_range == "last_7_days":
+            date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+            query_parts.append(f'created_at:>"{date}"')
+    
+    query = " AND ".join(query_parts) if query_parts else "*"
+    
+    search_result = await search_tickets(query)
+    
+    if "error" in search_result:
+        return search_result
+    
+    return {
+        "success": True,
+        "query": query,
+        "tickets": search_result.get("results", []),
+        "total": len(search_result.get("results", []))
+    }
+
+# ============================================================================
+# AUDIT & LOGGING TOOLS
+# ============================================================================
+
+@mcp.tool()
+async def get_ticket_processing_history(ticket_id: int) -> Dict[str, Any]:
+    """Get complete AI processing history for a ticket.
+    
+    Args:
+        ticket_id: Freshdesk ticket ID
+    
+    Returns:
+        Dict containing processing history from internal notes
+    """
+    # Get ticket conversations to extract internal notes
+    conversations = await get_ticket_conversation(ticket_id)
+    
+    if not isinstance(conversations, list):
+        return {"success": False, "error": "Failed to get conversations"}
+    
+    # Filter for internal notes with AI markers
+    ai_notes = []
+    for conv in conversations:
+        if conv.get("private") and conv.get("body_text"):
+            body = conv.get("body_text", "")
+            if any(marker in body for marker in ["✅ Classified by AI", "✅ Enriched by AI", "✅ Processed via AI"]):
+                ai_notes.append({
+                    "timestamp": conv.get("created_at"),
+                    "content": body,
+                    "user_id": conv.get("user_id")
+                })
+    
+    return {
+        "success": True,
+        "ticket_id": ticket_id,
+        "processing_history": ai_notes,
+        "total_ai_actions": len(ai_notes)
+    }
+
+
 
 # ----------------------------
 # MAIN — Streamable HTTP on 127.0.0.1:8001/mcp
