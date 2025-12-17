@@ -1,2 +1,7 @@
 FRESHDESK_API_KEY=YMkFyZwB3FYBgfIu70vU
 FRESHDESK_DOMAIN=hungamaltd.freshdesk.com
+
+HUNGAMA_USER_API = "https://h-accounts.hungama.com/webservice/api/user.php"
+HUNGAMA_SUBSCRIPTION_API = "https://payapi.hungama.com/v1/user/subscription_status"
+HUNGAMA_UNSUBSCRIPTION_API = "https://payapi.hungama.com/v1/user/unsubscription"
+HUNGAMA_API_KEY = "eedca4a2d4b0b360628958dd0fd210a6"
